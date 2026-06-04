@@ -5,10 +5,55 @@ import {
   createTranslationMat4,
   multiplyMat4,
 } from "@/lib/math/mat4";
-import type { WebGpuProgramDefinition } from "@/lib/webgpu/programs/types";
+import type {
+  WebGpuProgramBindGroupArgs,
+  WebGpuProgramDefinition,
+  WebGpuProgramFrameUniformArgs,
+} from "@/lib/webgpu/programs/types";
 
 const vertexStride = 6 * Float32Array.BYTES_PER_ELEMENT;
 const uniformFloatCount = 32;
+
+function createBasicLitBindGroupEntries({
+  uniformBuffer,
+}: WebGpuProgramBindGroupArgs): GPUBindGroupEntry[] {
+  return [
+    {
+      binding: 0,
+      resource: {
+        buffer: uniformBuffer,
+      },
+    },
+  ];
+}
+
+function writeBasicLitFrameUniforms({
+  uniformValues,
+  timestamp,
+  aspectRatio,
+  cameraDistance,
+  rotationSpeedX,
+  rotationSpeedY,
+}: WebGpuProgramFrameUniformArgs): void {
+  const projectionMatrix = createPerspectiveMat4(
+    Math.PI / 4,
+    aspectRatio,
+    0.1,
+    100,
+  );
+  const rotationXMatrix = createRotationXMat4(timestamp * rotationSpeedX);
+  const rotationYMatrix = createRotationYMat4(timestamp * rotationSpeedY);
+  const modelMatrix = multiplyMat4(rotationYMatrix, rotationXMatrix);
+  const viewMatrix = createTranslationMat4(0, 0, cameraDistance);
+  const viewModelMatrix = multiplyMat4(viewMatrix, modelMatrix);
+  const modelViewProjectionMatrix = multiplyMat4(
+    projectionMatrix,
+    viewModelMatrix,
+  );
+
+  uniformValues.set(modelViewProjectionMatrix, 0);
+  uniformValues.set(modelMatrix, 16);
+}
 
 export const basicLitProgram: WebGpuProgramDefinition = {
   label: "basic-lit",
@@ -43,39 +88,6 @@ export const basicLitProgram: WebGpuProgramDefinition = {
     depthWriteEnabled: true,
     depthCompare: "less",
   },
-  createBindGroupEntries: ({ uniformBuffer }) => [
-    {
-      binding: 0,
-      resource: {
-        buffer: uniformBuffer,
-      },
-    },
-  ],
-  writeFrameUniforms: ({
-    uniformValues,
-    timestamp,
-    aspectRatio,
-    cameraDistance,
-    rotationSpeedX,
-    rotationSpeedY,
-  }) => {
-    const projectionMatrix = createPerspectiveMat4(
-      Math.PI / 4,
-      aspectRatio,
-      0.1,
-      100,
-    );
-    const rotationXMatrix = createRotationXMat4(timestamp * rotationSpeedX);
-    const rotationYMatrix = createRotationYMat4(timestamp * rotationSpeedY);
-    const modelMatrix = multiplyMat4(rotationYMatrix, rotationXMatrix);
-    const viewMatrix = createTranslationMat4(0, 0, cameraDistance);
-    const viewModelMatrix = multiplyMat4(viewMatrix, modelMatrix);
-    const modelViewProjectionMatrix = multiplyMat4(
-      projectionMatrix,
-      viewModelMatrix,
-    );
-
-    uniformValues.set(modelViewProjectionMatrix, 0);
-    uniformValues.set(modelMatrix, 16);
-  },
+  createBindGroupEntries: createBasicLitBindGroupEntries,
+  writeFrameUniforms: writeBasicLitFrameUniforms,
 };

@@ -21,8 +21,6 @@ export type WebGpuProgramDefinition = Readonly<{
   uniformBufferByteLength: number;
   primitive: GPUPrimitiveState;
   depthStencil: GPUDepthStencilState;
-  createBindGroupEntries: (
-    args: WebGpuProgramBindGroupArgs,
-  ) => GPUBindGroupEntry[];
-  writeFrameUniforms: (args: WebGpuProgramFrameUniformArgs) => void;
+  createBindGroupEntries(args: WebGpuProgramBindGroupArgs): GPUBindGroupEntry[];
+  writeFrameUniforms(args: WebGpuProgramFrameUniformArgs): void;
 }>;
