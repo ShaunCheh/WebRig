@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "WebRig",
-  description: "Next.js + WebGPU rotating cube demo.",
+  description: "Next.js + WebGPU model surface playground.",
 };
 
 type RootLayoutProps = Readonly<{

@@ -1,5 +1,17 @@
-import { RotatingCubeCanvas } from "@/components/webgpu/rotating-cube-canvas";
+import { WebGpuSurface } from "@/components/webgpu/webgpu-surface";
 
 export default function WebGpuPage() {
-  return <RotatingCubeCanvas />;
+  return (
+    <main
+      style={{
+        width: "100vw",
+        height: "100vh",
+      }}
+    >
+      <WebGpuSurface
+        modelUrl="/models/torus.obj"
+        ariaLabel="Rotating WebGPU torus"
+      />
+    </main>
+  );
 }

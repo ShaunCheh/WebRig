@@ -1,5 +1,6 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import { useEffect, useRef, useState } from "react";
 import { fitMeshToUnitCube, parseObj } from "@/lib/loaders/obj-loader";
 import {
@@ -49,8 +50,13 @@ fn fsMain(input: VertexOutput) -> @location(0) vec4<f32> {
 `;
 
 const vertexStride = 6 * Float32Array.BYTES_PER_ELEMENT;
-const modelDistance = -5;
-const modelUrl = "/models/torus.obj";
+const defaultBackgroundColor = "#020617";
+const defaultClearColor = {
+  r: 0.02,
+  g: 0.04,
+  b: 0.08,
+  a: 1,
+} as const;
 
 type Status =
   | {
@@ -66,12 +72,44 @@ type Status =
       message: string;
     };
 
-export function RotatingCubeCanvas() {
+type SurfaceClearColor = {
+  r: number;
+  g: number;
+  b: number;
+  a?: number;
+};
+
+export type WebGpuSurfaceProps = Readonly<{
+  modelUrl: string;
+  ariaLabel?: string;
+  cameraDistance?: number;
+  rotationSpeedX?: number;
+  rotationSpeedY?: number;
+  backgroundColor?: string;
+  clearColor?: SurfaceClearColor;
+  style?: CSSProperties;
+}>;
+
+export function WebGpuSurface({
+  modelUrl,
+  ariaLabel = "WebGPU surface",
+  cameraDistance = -5,
+  rotationSpeedX = 0.0007,
+  rotationSpeedY = 0.001,
+  backgroundColor = defaultBackgroundColor,
+  clearColor,
+  style,
+}: WebGpuSurfaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [status, setStatus] = useState<Status>({
     phase: "initializing",
     message: "正在初始化 WebGPU...",
   });
+
+  const clearRed = clearColor?.r ?? defaultClearColor.r;
+  const clearGreen = clearColor?.g ?? defaultClearColor.g;
+  const clearBlue = clearColor?.b ?? defaultClearColor.b;
+  const clearAlpha = clearColor?.a ?? defaultClearColor.a;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -128,7 +166,7 @@ export function RotatingCubeCanvas() {
 
       depthTexture?.destroy();
       depthTexture = activeDevice.createTexture({
-        label: "model-depth-texture",
+        label: "surface-depth-texture",
         size: [nextWidth, nextHeight],
         format: "depth24plus",
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
@@ -137,7 +175,7 @@ export function RotatingCubeCanvas() {
       return { width: nextWidth, height: nextHeight };
     };
 
-    const initialize = async () => {
+    const initializeSurface = async () => {
       if (!("gpu" in navigator)) {
         updateStatus({
           phase: "unsupported",
@@ -216,7 +254,7 @@ export function RotatingCubeCanvas() {
         }
 
         const shaderModule = device.createShaderModule({
-          label: "obj-shader",
+          label: "surface-shader",
           code: shaderCode,
         });
 
@@ -224,7 +262,7 @@ export function RotatingCubeCanvas() {
         indexFormat = mesh.indices instanceof Uint32Array ? "uint32" : "uint16";
 
         vertexBuffer = device.createBuffer({
-          label: "obj-vertex-buffer",
+          label: "surface-vertex-buffer",
           size: mesh.vertices.byteLength,
           usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
           mappedAtCreation: true,
@@ -233,7 +271,7 @@ export function RotatingCubeCanvas() {
         vertexBuffer.unmap();
 
         indexBuffer = device.createBuffer({
-          label: "obj-index-buffer",
+          label: "surface-index-buffer",
           size: mesh.indices.byteLength,
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
           mappedAtCreation: true,
@@ -248,13 +286,13 @@ export function RotatingCubeCanvas() {
         indexBuffer.unmap();
 
         uniformBuffer = device.createBuffer({
-          label: "obj-uniform-buffer",
+          label: "surface-uniform-buffer",
           size: uniformValues.byteLength,
           usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
         const pipeline = device.createRenderPipeline({
-          label: "obj-render-pipeline",
+          label: "surface-render-pipeline",
           layout: "auto",
           vertex: {
             module: shaderModule,
@@ -298,7 +336,7 @@ export function RotatingCubeCanvas() {
         });
 
         const bindGroup = device.createBindGroup({
-          label: "obj-bind-group",
+          label: "surface-bind-group",
           layout: pipeline.getBindGroupLayout(0),
           entries: [
             {
@@ -334,10 +372,10 @@ export function RotatingCubeCanvas() {
             0.1,
             100,
           );
-          const rotationXMatrix = createRotationXMat4(timestamp * 0.0007);
-          const rotationYMatrix = createRotationYMat4(timestamp * 0.001);
+          const rotationXMatrix = createRotationXMat4(timestamp * rotationSpeedX);
+          const rotationYMatrix = createRotationYMat4(timestamp * rotationSpeedY);
           const modelMatrix = multiplyMat4(rotationYMatrix, rotationXMatrix);
-          const viewMatrix = createTranslationMat4(0, 0, modelDistance);
+          const viewMatrix = createTranslationMat4(0, 0, cameraDistance);
           const viewModelMatrix = multiplyMat4(viewMatrix, modelMatrix);
           const modelViewProjectionMatrix = multiplyMat4(
             projectionMatrix,
@@ -350,17 +388,17 @@ export function RotatingCubeCanvas() {
           device.queue.writeBuffer(uniformBuffer, 0, uniformValues);
 
           const commandEncoder = device.createCommandEncoder({
-            label: "obj-command-encoder",
+            label: "surface-command-encoder",
           });
           const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [
               {
                 view: context.getCurrentTexture().createView(),
                 clearValue: {
-                  r: 0.02,
-                  g: 0.04,
-                  b: 0.08,
-                  a: 1,
+                  r: clearRed,
+                  g: clearGreen,
+                  b: clearBlue,
+                  a: clearAlpha,
                 },
                 loadOp: "clear",
                 storeOp: "store",
@@ -397,7 +435,7 @@ export function RotatingCubeCanvas() {
       }
     };
 
-    void initialize();
+    void initializeSurface();
 
     return () => {
       isDisposed = true;
@@ -406,22 +444,31 @@ export function RotatingCubeCanvas() {
       device?.destroy();
       device = null;
     };
-  }, []);
+  }, [
+    cameraDistance,
+    clearAlpha,
+    clearBlue,
+    clearGreen,
+    clearRed,
+    modelUrl,
+    rotationSpeedX,
+    rotationSpeedY,
+  ]);
 
   return (
     <div
       style={{
-        position: "fixed",
-        inset: 0,
-        margin: 0,
-        padding: 0,
+        position: "relative",
+        width: "100%",
+        height: "100%",
         overflow: "hidden",
-        backgroundColor: "#020617",
+        ...style,
+        backgroundColor,
       }}
     >
       <canvas
         ref={canvasRef}
-        aria-label="Rotating WebGPU model"
+        aria-label={ariaLabel}
         style={{
           width: "100%",
           height: "100%",
