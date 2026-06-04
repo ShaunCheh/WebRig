@@ -4,16 +4,16 @@ overview: 把当前散落在 `WebGpuSurface` 中的 shader/pipeline/uniform 契�
 todos:
   - id: define-program-types
     content: 新增 program 类型定义，明确 shader/pipeline/uniform/bind-group 契约
-    status: pending
+    status: completed
   - id: migrate-basic-lit
     content: 把 basic-lit 的 TS 侧契约迁移为独立 basicLitProgram
-    status: pending
+    status: completed
   - id: refactor-surface
     content: 让 WebGpuSurface 改为消费 program，而不是持有硬编码 shader 契约
-    status: pending
+    status: completed
   - id: verify-contract
     content: 验证 torus + basic-lit 渲染结果与 lint/typecheck/build 一致
-    status: pending
+    status: completed
 isProject: false
 ---
 

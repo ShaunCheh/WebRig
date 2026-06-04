@@ -1,4 +1,7 @@
+"use client";
+
 import { WebGpuSurface } from "@/components/webgpu/webgpu-surface";
+import { basicLitProgram } from "@/lib/webgpu/programs/basic-lit-program";
 
 export default function WebGpuPage() {
   return (
@@ -10,7 +13,7 @@ export default function WebGpuPage() {
     >
       <WebGpuSurface
         modelUrl="/models/torus.obj"
-        shaderUrl="/shaders/basic-lit.wgsl"
+        program={basicLitProgram}
         ariaLabel="Rotating WebGPU torus"
       />
     </main>

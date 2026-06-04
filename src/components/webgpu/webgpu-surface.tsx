@@ -3,15 +3,8 @@
 import type { CSSProperties } from "react";
 import { useEffect, useRef, useState } from "react";
 import { fitMeshToUnitCube, parseObj } from "@/lib/loaders/obj-loader";
-import {
-  createPerspectiveMat4,
-  createRotationXMat4,
-  createRotationYMat4,
-  createTranslationMat4,
-  multiplyMat4,
-} from "@/lib/math/mat4";
+import type { WebGpuProgramDefinition } from "@/lib/webgpu/programs/types";
 
-const vertexStride = 6 * Float32Array.BYTES_PER_ELEMENT;
 const defaultBackgroundColor = "#020617";
 const defaultClearColor = {
   r: 0.02,
@@ -19,6 +12,14 @@ const defaultClearColor = {
   b: 0.08,
   a: 1,
 } as const;
+
+function createUniformValues(byteLength: number): Float32Array<ArrayBuffer> {
+  if (byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error("Program uniformBufferByteLength 必须是 4 字节对齐。");
+  }
+
+  return new Float32Array(byteLength / Float32Array.BYTES_PER_ELEMENT);
+}
 
 type Status =
   | {
@@ -43,7 +44,7 @@ type SurfaceClearColor = {
 
 export type WebGpuSurfaceProps = Readonly<{
   modelUrl: string;
-  shaderUrl: string;
+  program: WebGpuProgramDefinition;
   ariaLabel?: string;
   cameraDistance?: number;
   rotationSpeedX?: number;
@@ -55,7 +56,7 @@ export type WebGpuSurfaceProps = Readonly<{
 
 export function WebGpuSurface({
   modelUrl,
-  shaderUrl,
+  program,
   ariaLabel = "WebGPU surface",
   cameraDistance = -5,
   rotationSpeedX = 0.0007,
@@ -82,6 +83,8 @@ export function WebGpuSurface({
       return;
     }
 
+    const uniformValues = createUniformValues(program.uniformBufferByteLength);
+
     let isDisposed = false;
     let animationFrameId = 0;
     let device: GPUDevice | null = null;
@@ -91,8 +94,6 @@ export function WebGpuSurface({
     let uniformBuffer: GPUBuffer | null = null;
     let indexCount = 0;
     let indexFormat: GPUIndexFormat = "uint16";
-
-    const uniformValues = new Float32Array(32);
 
     const updateStatus = (nextStatus: Status) => {
       if (!isDisposed) {
@@ -204,7 +205,7 @@ export function WebGpuSurface({
 
         const [modelResponse, shaderResponse] = await Promise.all([
           fetch(modelUrl),
-          fetch(shaderUrl),
+          fetch(program.shaderUrl),
         ]);
 
         if (!modelResponse.ok) {
@@ -231,7 +232,7 @@ export function WebGpuSurface({
         }
 
         const shaderModule = device.createShaderModule({
-          label: shaderUrl,
+          label: `${program.label}-shader`,
           code: shaderCode,
         });
 
@@ -239,7 +240,7 @@ export function WebGpuSurface({
         indexFormat = mesh.indices instanceof Uint32Array ? "uint32" : "uint16";
 
         vertexBuffer = device.createBuffer({
-          label: "surface-vertex-buffer",
+          label: `${program.label}-vertex-buffer`,
           size: mesh.vertices.byteLength,
           usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
           mappedAtCreation: true,
@@ -248,7 +249,7 @@ export function WebGpuSurface({
         vertexBuffer.unmap();
 
         indexBuffer = device.createBuffer({
-          label: "surface-index-buffer",
+          label: `${program.label}-index-buffer`,
           size: mesh.indices.byteLength,
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
           mappedAtCreation: true,
@@ -263,66 +264,38 @@ export function WebGpuSurface({
         indexBuffer.unmap();
 
         uniformBuffer = device.createBuffer({
-          label: "surface-uniform-buffer",
-          size: uniformValues.byteLength,
+          label: `${program.label}-uniform-buffer`,
+          size: program.uniformBufferByteLength,
           usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
         const pipeline = device.createRenderPipeline({
-          label: "surface-render-pipeline",
+          label: `${program.label}-render-pipeline`,
           layout: "auto",
           vertex: {
             module: shaderModule,
-            entryPoint: "vsMain",
-            buffers: [
-              {
-                arrayStride: vertexStride,
-                attributes: [
-                  {
-                    shaderLocation: 0,
-                    offset: 0,
-                    format: "float32x3",
-                  },
-                  {
-                    shaderLocation: 1,
-                    offset: 3 * Float32Array.BYTES_PER_ELEMENT,
-                    format: "float32x3",
-                  },
-                ],
-              },
-            ],
+            entryPoint: program.vertexEntryPoint,
+            buffers: program.vertexBufferLayouts,
           },
           fragment: {
             module: shaderModule,
-            entryPoint: "fsMain",
+            entryPoint: program.fragmentEntryPoint,
             targets: [
               {
                 format: presentationFormat,
               },
             ],
           },
-          primitive: {
-            topology: "triangle-list",
-            cullMode: "back",
-          },
-          depthStencil: {
-            format: "depth24plus",
-            depthWriteEnabled: true,
-            depthCompare: "less",
-          },
+          primitive: program.primitive,
+          depthStencil: program.depthStencil,
         });
 
         const bindGroup = device.createBindGroup({
-          label: "surface-bind-group",
-          layout: pipeline.getBindGroupLayout(0),
-          entries: [
-            {
-              binding: 0,
-              resource: {
-                buffer: uniformBuffer,
-              },
-            },
-          ],
+          label: `${program.label}-bind-group`,
+          layout: pipeline.getBindGroupLayout(program.bindGroupIndex),
+          entries: program.createBindGroupEntries({
+            uniformBuffer,
+          }),
         });
 
         updateStatus({
@@ -343,24 +316,14 @@ export function WebGpuSurface({
 
           const { width, height } = ensureDrawableSize(device);
           const aspectRatio = width / height;
-          const projectionMatrix = createPerspectiveMat4(
-            Math.PI / 4,
+          program.writeFrameUniforms({
+            uniformValues,
+            timestamp,
             aspectRatio,
-            0.1,
-            100,
-          );
-          const rotationXMatrix = createRotationXMat4(timestamp * rotationSpeedX);
-          const rotationYMatrix = createRotationYMat4(timestamp * rotationSpeedY);
-          const modelMatrix = multiplyMat4(rotationYMatrix, rotationXMatrix);
-          const viewMatrix = createTranslationMat4(0, 0, cameraDistance);
-          const viewModelMatrix = multiplyMat4(viewMatrix, modelMatrix);
-          const modelViewProjectionMatrix = multiplyMat4(
-            projectionMatrix,
-            viewModelMatrix,
-          );
-
-          uniformValues.set(modelViewProjectionMatrix, 0);
-          uniformValues.set(modelMatrix, 16);
+            cameraDistance,
+            rotationSpeedX,
+            rotationSpeedY,
+          });
 
           device.queue.writeBuffer(uniformBuffer, 0, uniformValues);
 
@@ -390,7 +353,7 @@ export function WebGpuSurface({
           });
 
           renderPass.setPipeline(pipeline);
-          renderPass.setBindGroup(0, bindGroup);
+          renderPass.setBindGroup(program.bindGroupIndex, bindGroup);
           renderPass.setVertexBuffer(0, vertexBuffer);
           renderPass.setIndexBuffer(indexBuffer, indexFormat);
           renderPass.drawIndexed(indexCount);
@@ -428,7 +391,7 @@ export function WebGpuSurface({
     clearGreen,
     clearRed,
     modelUrl,
-    shaderUrl,
+    program,
     rotationSpeedX,
     rotationSpeedY,
   ]);
