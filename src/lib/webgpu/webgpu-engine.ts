@@ -70,6 +70,8 @@ export class WebGpuEngine {
   private depthTexture: GPUTexture | null = null;
   private sceneResources: WebGpuSceneResources | null = null;
 
+  private printCounter: number = 0;
+
   public constructor(options: WebGpuEngineOptions) {
     this.canvas = options.canvas;
     this.modelUrl = options.modelUrl;
@@ -405,6 +407,11 @@ export class WebGpuEngine {
     renderPass.setIndexBuffer(sceneResources.indexBuffer, sceneResources.indexFormat);
     renderPass.drawIndexed(sceneResources.indexCount);
     renderPass.end();
+
+    this.printCounter++;
+    if (this.printCounter % 100 === 0) {
+      console.log("commandEncoder", commandEncoder);
+    }
 
     device.queue.submit([commandEncoder.finish()]);
     this.animationFrameId = window.requestAnimationFrame(this.renderFrame);
