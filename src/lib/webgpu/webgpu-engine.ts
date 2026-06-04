@@ -23,14 +23,42 @@ export type WebGpuClearColor = Readonly<{
   a: number;
 }>;
 
-type WebGpuOverlayResources = {
-  vertexBuffer: GPUBuffer;
-  vertexData: Float32Array<ArrayBuffer>;
-  pipeline: GPURenderPipeline;
-  vertexCount: number;
+export type WebGpuRenderItemInitializeContext = Readonly<{
+  device: GPUDevice;
+  presentationFormat: GPUTextureFormat;
+}>;
+
+export type WebGpuRenderItemFrameContext = Readonly<{
+  device: GPUDevice;
+  queue: GPUQueue;
+  canvas: HTMLCanvasElement;
+  timestamp: DOMHighResTimeStamp;
+  width: number;
+  height: number;
+  aspectRatio: number;
+}>;
+
+export type WebGpuRenderItem = {
+  initialize(
+    context: WebGpuRenderItemInitializeContext,
+  ): Promise<void> | void;
+  prepareFrame?(context: WebGpuRenderItemFrameContext): void;
+  encodeRenderPass(
+    renderPass: GPURenderPassEncoder,
+    context: WebGpuRenderItemFrameContext,
+  ): void;
+  dispose(): void;
 };
 
-type WebGpuSceneResources = {
+type WebGpuMeshRenderItemOptions = Readonly<{
+  modelUrl: string;
+  program: WebGpuProgramDefinition;
+  cameraDistance: number;
+  rotationSpeedX: number;
+  rotationSpeedY: number;
+}>;
+
+type WebGpuMeshRenderResources = {
   vertexBuffer: GPUBuffer;
   indexBuffer: GPUBuffer;
   uniformBuffer: GPUBuffer;
@@ -39,7 +67,13 @@ type WebGpuSceneResources = {
   bindGroup: GPUBindGroup;
   indexCount: number;
   indexFormat: GPUIndexFormat;
-  overlayResources: WebGpuOverlayResources;
+};
+
+type WebGpuOverlayRenderResources = {
+  vertexBuffer: GPUBuffer;
+  vertexData: Float32Array<ArrayBuffer>;
+  pipeline: GPURenderPipeline;
+  vertexCount: number;
 };
 
 export type WebGpuEngineOptions = Readonly<{
@@ -53,14 +87,6 @@ export type WebGpuEngineOptions = Readonly<{
   onStatusChange(status: WebGpuEngineStatus): void;
 }>;
 
-function createUniformValues(byteLength: number): Float32Array<ArrayBuffer> {
-  if (byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) {
-    throw new Error("Program uniformBufferByteLength 必须是 4 字节对齐。");
-  }
-
-  return new Float32Array(byteLength / Float32Array.BYTES_PER_ELEMENT);
-}
-
 const overlayShaderUrl = "/shaders/overlay-square.wgsl";
 const overlayVertexStride = 5 * Float32Array.BYTES_PER_ELEMENT;
 const overlayVertexCount = 6;
@@ -72,33 +98,428 @@ const overlayColor = {
   b: 0.35,
 } as const;
 
+function createUniformValues(byteLength: number): Float32Array<ArrayBuffer> {
+  if (byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error("Program uniformBufferByteLength 必须是 4 字节对齐。");
+  }
+
+  return new Float32Array(byteLength / Float32Array.BYTES_PER_ELEMENT);
+}
+
+async function loadTextResource(
+  resourceUrl: string,
+  resourceName: string,
+): Promise<string> {
+  const response = await fetch(resourceUrl);
+
+  if (!response.ok) {
+    throw new Error(
+      `加载 ${resourceName} 失败：${response.status} ${response.statusText || "未知错误"}`,
+    );
+  }
+
+  return response.text();
+}
+
+async function loadMeshAsset(modelUrl: string): Promise<ObjMesh> {
+  const modelText = await loadTextResource(modelUrl, "OBJ");
+  const mesh = parseObj(modelText);
+
+  fitMeshToUnitCube(mesh.vertices);
+
+  return mesh;
+}
+
+function createMeshVertexBuffer(
+  device: GPUDevice,
+  program: WebGpuProgramDefinition,
+  mesh: ObjMesh,
+): GPUBuffer {
+  const vertexBuffer = device.createBuffer({
+    label: `${program.label}-vertex-buffer`,
+    size: mesh.vertices.byteLength,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    mappedAtCreation: true,
+  });
+
+  new Float32Array(vertexBuffer.getMappedRange()).set(mesh.vertices);
+  vertexBuffer.unmap();
+
+  return vertexBuffer;
+}
+
+function createMeshIndexBuffer(
+  device: GPUDevice,
+  program: WebGpuProgramDefinition,
+  mesh: ObjMesh,
+): {
+  indexBuffer: GPUBuffer;
+  indexCount: number;
+  indexFormat: GPUIndexFormat;
+} {
+  const indexBuffer = device.createBuffer({
+    label: `${program.label}-index-buffer`,
+    size: mesh.indices.byteLength,
+    usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+    mappedAtCreation: true,
+  });
+
+  if (mesh.indices instanceof Uint32Array) {
+    new Uint32Array(indexBuffer.getMappedRange()).set(mesh.indices);
+  } else {
+    new Uint16Array(indexBuffer.getMappedRange()).set(mesh.indices);
+  }
+
+  indexBuffer.unmap();
+
+  return {
+    indexBuffer,
+    indexCount: mesh.indices.length,
+    indexFormat: mesh.indices instanceof Uint32Array ? "uint32" : "uint16",
+  };
+}
+
+function createProgramRenderPipeline(
+  device: GPUDevice,
+  program: WebGpuProgramDefinition,
+  shaderCode: string,
+  presentationFormat: GPUTextureFormat,
+): GPURenderPipeline {
+  const shaderModule = device.createShaderModule({
+    label: `${program.label}-shader`,
+    code: shaderCode,
+  });
+
+  return device.createRenderPipeline({
+    label: `${program.label}-render-pipeline`,
+    layout: "auto",
+    vertex: {
+      module: shaderModule,
+      entryPoint: program.vertexEntryPoint,
+      buffers: program.vertexBufferLayouts,
+    },
+    fragment: {
+      module: shaderModule,
+      entryPoint: program.fragmentEntryPoint,
+      targets: [
+        {
+          format: presentationFormat,
+        },
+      ],
+    },
+    primitive: program.primitive,
+    depthStencil: program.depthStencil,
+  });
+}
+
+function createOverlayResources(
+  device: GPUDevice,
+  presentationFormat: GPUTextureFormat,
+  overlayShaderCode: string,
+): WebGpuOverlayRenderResources {
+  const overlayShaderModule = device.createShaderModule({
+    label: "overlay-square-shader",
+    code: overlayShaderCode,
+  });
+  const overlayVertexBuffer = device.createBuffer({
+    label: "overlay-square-vertex-buffer",
+    size: overlayVertexCount * overlayVertexStride,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+  const overlayVertexData = new Float32Array(overlayVertexCount * 5);
+  const overlayPipeline = device.createRenderPipeline({
+    label: "overlay-square-render-pipeline",
+    layout: "auto",
+    vertex: {
+      module: overlayShaderModule,
+      entryPoint: "vsMain",
+      buffers: [
+        {
+          arrayStride: overlayVertexStride,
+          attributes: [
+            {
+              shaderLocation: 0,
+              offset: 0,
+              format: "float32x2",
+            },
+            {
+              shaderLocation: 1,
+              offset: 2 * Float32Array.BYTES_PER_ELEMENT,
+              format: "float32x3",
+            },
+          ],
+        },
+      ],
+    },
+    fragment: {
+      module: overlayShaderModule,
+      entryPoint: "fsMain",
+      targets: [
+        {
+          format: presentationFormat,
+        },
+      ],
+    },
+    primitive: {
+      topology: "triangle-list",
+      cullMode: "none",
+    },
+    depthStencil: {
+      format: "depth24plus",
+      depthWriteEnabled: false,
+      depthCompare: "always",
+    },
+  });
+
+  return {
+    vertexBuffer: overlayVertexBuffer,
+    vertexData: overlayVertexData,
+    pipeline: overlayPipeline,
+    vertexCount: overlayVertexCount,
+  };
+}
+
+function updateOverlayVertexData(
+  overlayResources: WebGpuOverlayRenderResources,
+  width: number,
+  height: number,
+): void {
+  const left = overlayPaddingPx;
+  const top = overlayPaddingPx;
+  const right = left + overlaySizePx;
+  const bottom = top + overlaySizePx;
+
+  const leftNdc = (left / width) * 2 - 1;
+  const rightNdc = (right / width) * 2 - 1;
+  const topNdc = 1 - (top / height) * 2;
+  const bottomNdc = 1 - (bottom / height) * 2;
+
+  overlayResources.vertexData.set(
+    [
+      leftNdc,
+      topNdc,
+      overlayColor.r,
+      overlayColor.g,
+      overlayColor.b,
+      rightNdc,
+      topNdc,
+      overlayColor.r,
+      overlayColor.g,
+      overlayColor.b,
+      rightNdc,
+      bottomNdc,
+      overlayColor.r,
+      overlayColor.g,
+      overlayColor.b,
+      leftNdc,
+      topNdc,
+      overlayColor.r,
+      overlayColor.g,
+      overlayColor.b,
+      rightNdc,
+      bottomNdc,
+      overlayColor.r,
+      overlayColor.g,
+      overlayColor.b,
+      leftNdc,
+      bottomNdc,
+      overlayColor.r,
+      overlayColor.g,
+      overlayColor.b,
+    ],
+    0,
+  );
+}
+
+function createRotatingMeshRenderItem(
+  options: WebGpuMeshRenderItemOptions,
+): WebGpuRenderItem {
+  let resources: WebGpuMeshRenderResources | null = null;
+
+  return {
+    async initialize({
+      device,
+      presentationFormat,
+    }: WebGpuRenderItemInitializeContext): Promise<void> {
+      const [mesh, shaderCode] = await Promise.all([
+        loadMeshAsset(options.modelUrl),
+        loadTextResource(options.program.shaderUrl, "Shader"),
+      ]);
+      const vertexBuffer = createMeshVertexBuffer(device, options.program, mesh);
+      const {
+        indexBuffer,
+        indexCount,
+        indexFormat,
+      } = createMeshIndexBuffer(device, options.program, mesh);
+      const uniformValues = createUniformValues(
+        options.program.uniformBufferByteLength,
+      );
+      const uniformBuffer = device.createBuffer({
+        label: `${options.program.label}-uniform-buffer`,
+        size: options.program.uniformBufferByteLength,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      const pipeline = createProgramRenderPipeline(
+        device,
+        options.program,
+        shaderCode,
+        presentationFormat,
+      );
+      const bindGroup = device.createBindGroup({
+        label: `${options.program.label}-bind-group`,
+        layout: pipeline.getBindGroupLayout(options.program.bindGroupIndex),
+        entries: options.program.createBindGroupEntries({
+          uniformBuffer,
+        }),
+      });
+
+      resources = {
+        vertexBuffer,
+        indexBuffer,
+        uniformBuffer,
+        uniformValues,
+        pipeline,
+        bindGroup,
+        indexCount,
+        indexFormat,
+      };
+    },
+
+    prepareFrame(frameContext: WebGpuRenderItemFrameContext): void {
+      if (resources === null) {
+        return;
+      }
+
+      options.program.writeFrameUniforms({
+        uniformValues: resources.uniformValues,
+        timestamp: frameContext.timestamp,
+        aspectRatio: frameContext.aspectRatio,
+        cameraDistance: options.cameraDistance,
+        rotationSpeedX: options.rotationSpeedX,
+        rotationSpeedY: options.rotationSpeedY,
+      });
+
+      frameContext.queue.writeBuffer(
+        resources.uniformBuffer,
+        0,
+        resources.uniformValues,
+      );
+    },
+
+    encodeRenderPass(
+      renderPass: GPURenderPassEncoder,
+      _frameContext: WebGpuRenderItemFrameContext,
+    ): void {
+      if (resources === null) {
+        return;
+      }
+
+      renderPass.setPipeline(resources.pipeline);
+      renderPass.setBindGroup(
+        options.program.bindGroupIndex,
+        resources.bindGroup,
+      );
+      renderPass.setVertexBuffer(0, resources.vertexBuffer);
+      renderPass.setIndexBuffer(resources.indexBuffer, resources.indexFormat);
+      renderPass.drawIndexed(resources.indexCount);
+    },
+
+    dispose(): void {
+      if (resources === null) {
+        return;
+      }
+
+      resources.vertexBuffer.destroy();
+      resources.indexBuffer.destroy();
+      resources.uniformBuffer.destroy();
+      resources = null;
+    },
+  };
+}
+
+function createOverlayRenderItem(): WebGpuRenderItem {
+  let resources: WebGpuOverlayRenderResources | null = null;
+
+  return {
+    async initialize({
+      device,
+      presentationFormat,
+    }: WebGpuRenderItemInitializeContext): Promise<void> {
+      const overlayShaderCode = await loadTextResource(
+        overlayShaderUrl,
+        "Overlay Shader",
+      );
+
+      resources = createOverlayResources(
+        device,
+        presentationFormat,
+        overlayShaderCode,
+      );
+    },
+
+    prepareFrame(frameContext: WebGpuRenderItemFrameContext): void {
+      if (resources === null) {
+        return;
+      }
+
+      updateOverlayVertexData(
+        resources,
+        frameContext.width,
+        frameContext.height,
+      );
+      frameContext.queue.writeBuffer(resources.vertexBuffer, 0, resources.vertexData);
+    },
+
+    encodeRenderPass(
+      renderPass: GPURenderPassEncoder,
+      _frameContext: WebGpuRenderItemFrameContext,
+    ): void {
+      if (resources === null) {
+        return;
+      }
+
+      renderPass.setPipeline(resources.pipeline);
+      renderPass.setVertexBuffer(0, resources.vertexBuffer);
+      renderPass.draw(resources.vertexCount);
+    },
+
+    dispose(): void {
+      if (resources === null) {
+        return;
+      }
+
+      resources.vertexBuffer.destroy();
+      resources = null;
+    },
+  };
+}
+
 export class WebGpuEngine {
   private readonly canvas: HTMLCanvasElement;
-  private readonly modelUrl: string;
-  private readonly program: WebGpuProgramDefinition;
-  private readonly cameraDistance: number;
-  private readonly rotationSpeedX: number;
-  private readonly rotationSpeedY: number;
   private readonly clearColor: WebGpuClearColor;
   private readonly onStatusChange: WebGpuEngineOptions["onStatusChange"];
+  private readonly renderItems: WebGpuRenderItem[];
 
   private animationFrameId = 0;
   private isDisposed = false;
   private device: GPUDevice | null = null;
   private context: GPUCanvasContext | null = null;
   private depthTexture: GPUTexture | null = null;
-  private sceneResources: WebGpuSceneResources | null = null;
-
 
   public constructor(options: WebGpuEngineOptions) {
     this.canvas = options.canvas;
-    this.modelUrl = options.modelUrl;
-    this.program = options.program;
-    this.cameraDistance = options.cameraDistance;
-    this.rotationSpeedX = options.rotationSpeedX;
-    this.rotationSpeedY = options.rotationSpeedY;
     this.clearColor = options.clearColor;
     this.onStatusChange = options.onStatusChange;
+    this.renderItems = [
+      createRotatingMeshRenderItem({
+        modelUrl: options.modelUrl,
+        program: options.program,
+        cameraDistance: options.cameraDistance,
+        rotationSpeedX: options.rotationSpeedX,
+        rotationSpeedY: options.rotationSpeedY,
+      }),
+      createOverlayRenderItem(),
+    ];
 
     this.handleDeviceLost = this.handleDeviceLost.bind(this);
     this.renderFrame = this.renderFrame.bind(this);
@@ -111,7 +532,7 @@ export class WebGpuEngine {
   public dispose(): void {
     this.isDisposed = true;
     window.cancelAnimationFrame(this.animationFrameId);
-    this.destroySceneResources();
+    this.destroyRenderItems();
     this.destroyDepthTexture();
 
     if (this.device !== null) {
@@ -167,14 +588,17 @@ export class WebGpuEngine {
         alphaMode: "opaque",
       });
 
-      const sceneResources = await this.createSceneResources(presentationFormat);
+      this.updateStatus({
+        phase: "initializing",
+        message: "正在加载场景资源...",
+      });
+
+      await this.initializeRenderItems(device, presentationFormat);
 
       if (this.isDisposed) {
-        this.destroySceneResources(sceneResources);
+        this.destroyRenderItems();
         return;
       }
-
-      this.sceneResources = sceneResources;
 
       this.updateStatus({
         phase: "ready",
@@ -207,362 +631,49 @@ export class WebGpuEngine {
     return adapter.requestDevice();
   }
 
-  private async createSceneResources(
-    presentationFormat: GPUTextureFormat,
-  ): Promise<WebGpuSceneResources> {
-    const { mesh, shaderCode, overlayShaderCode } = await this.loadSceneAssets();
-    const device = this.getDeviceOrThrow();
-    const shaderModule = this.createShaderModule(shaderCode);
-    const vertexBuffer = this.createVertexBuffer(device, mesh);
-    const {
-      indexBuffer,
-      indexCount,
-      indexFormat,
-    } = this.createIndexBuffer(device, mesh);
-    const uniformValues = createUniformValues(this.program.uniformBufferByteLength);
-    const uniformBuffer = device.createBuffer({
-      label: `${this.program.label}-uniform-buffer`,
-      size: this.program.uniformBufferByteLength,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    const pipeline = this.createRenderPipeline(shaderModule, presentationFormat);
-    const bindGroup = device.createBindGroup({
-      label: `${this.program.label}-bind-group`,
-      layout: pipeline.getBindGroupLayout(this.program.bindGroupIndex),
-      entries: this.program.createBindGroupEntries({
-        uniformBuffer,
-      }),
-    });
-    const overlayResources = this.createOverlayResources(
-      device,
-      presentationFormat,
-      overlayShaderCode,
-    );
-
-    return {
-      vertexBuffer,
-      indexBuffer,
-      uniformBuffer,
-      uniformValues,
-      pipeline,
-      bindGroup,
-      indexCount,
-      indexFormat,
-      overlayResources,
-    };
-  }
-
-  private async loadSceneAssets(): Promise<{
-    mesh: ObjMesh;
-    shaderCode: string;
-    overlayShaderCode: string;
-  }> {
-    this.updateStatus({
-      phase: "initializing",
-      message: "正在加载场景资源...",
-    });
-
-    const [modelResponse, shaderResponse, overlayShaderResponse] = await Promise.all([
-      fetch(this.modelUrl),
-      fetch(this.program.shaderUrl),
-      fetch(overlayShaderUrl),
-    ]);
-
-    if (!modelResponse.ok) {
-      throw new Error(
-        `加载 OBJ 失败：${modelResponse.status} ${modelResponse.statusText || "未知错误"}`,
-      );
-    }
-
-    if (!shaderResponse.ok) {
-      throw new Error(
-        `加载 Shader 失败：${shaderResponse.status} ${shaderResponse.statusText || "未知错误"}`,
-      );
-    }
-
-    if (!overlayShaderResponse.ok) {
-      throw new Error(
-        `加载 Overlay Shader 失败：${overlayShaderResponse.status} ${overlayShaderResponse.statusText || "未知错误"}`,
-      );
-    }
-
-    const [modelText, shaderCode, overlayShaderCode] = await Promise.all([
-      modelResponse.text(),
-      shaderResponse.text(),
-      overlayShaderResponse.text(),
-    ]);
-    const mesh = parseObj(modelText);
-
-    fitMeshToUnitCube(mesh.vertices);
-
-    return {
-      mesh,
-      shaderCode,
-      overlayShaderCode,
-    };
-  }
-
-  private createShaderModule(shaderCode: string): GPUShaderModule {
-    const device = this.getDeviceOrThrow();
-
-    return device.createShaderModule({
-      label: `${this.program.label}-shader`,
-      code: shaderCode,
-    });
-  }
-
-  private createVertexBuffer(device: GPUDevice, mesh: ObjMesh): GPUBuffer {
-    const vertexBuffer = device.createBuffer({
-      label: `${this.program.label}-vertex-buffer`,
-      size: mesh.vertices.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true,
-    });
-
-    new Float32Array(vertexBuffer.getMappedRange()).set(mesh.vertices);
-    vertexBuffer.unmap();
-
-    return vertexBuffer;
-  }
-
-  private createIndexBuffer(
-    device: GPUDevice,
-    mesh: ObjMesh,
-  ): {
-    indexBuffer: GPUBuffer;
-    indexCount: number;
-    indexFormat: GPUIndexFormat;
-  } {
-    const indexBuffer = device.createBuffer({
-      label: `${this.program.label}-index-buffer`,
-      size: mesh.indices.byteLength,
-      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true,
-    });
-
-    if (mesh.indices instanceof Uint32Array) {
-      new Uint32Array(indexBuffer.getMappedRange()).set(mesh.indices);
-    } else {
-      new Uint16Array(indexBuffer.getMappedRange()).set(mesh.indices);
-    }
-
-    indexBuffer.unmap();
-
-    return {
-      indexBuffer,
-      indexCount: mesh.indices.length,
-      indexFormat: mesh.indices instanceof Uint32Array ? "uint32" : "uint16",
-    };
-  }
-
-  private createRenderPipeline(
-    shaderModule: GPUShaderModule,
-    presentationFormat: GPUTextureFormat,
-  ): GPURenderPipeline {
-    const device = this.getDeviceOrThrow();
-    const pipelineDescriptor = this.createRenderPipelineDescriptor(
-      shaderModule,
-      presentationFormat,
-    );
-
-    return device.createRenderPipeline(pipelineDescriptor);
-  }
-
-  private createRenderPipelineDescriptor(
-    shaderModule: GPUShaderModule,
-    presentationFormat: GPUTextureFormat,
-  ): GPURenderPipelineDescriptor {
-    return {
-      label: `${this.program.label}-render-pipeline`,
-      layout: "auto",
-      vertex: {
-        module: shaderModule,
-        entryPoint: this.program.vertexEntryPoint,
-        buffers: this.program.vertexBufferLayouts,
-      },
-      fragment: {
-        module: shaderModule,
-        entryPoint: this.program.fragmentEntryPoint,
-        targets: [
-          {
-            format: presentationFormat,
-          },
-        ],
-      },
-      primitive: this.program.primitive,
-      depthStencil: this.program.depthStencil,
-    };
-  }
-
-  private createOverlayResources(
+  private async initializeRenderItems(
     device: GPUDevice,
     presentationFormat: GPUTextureFormat,
-    overlayShaderCode: string,
-  ): WebGpuOverlayResources {
-    const overlayShaderModule = device.createShaderModule({
-      label: "overlay-square-shader",
-      code: overlayShaderCode,
-    });
-    const overlayVertexBuffer = device.createBuffer({
-      label: "overlay-square-vertex-buffer",
-      size: overlayVertexCount * overlayVertexStride,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    });
-    const overlayVertexData = new Float32Array(overlayVertexCount * 5);
-    const overlayPipeline = device.createRenderPipeline({
-      label: "overlay-square-render-pipeline",
-      layout: "auto",
-      vertex: {
-        module: overlayShaderModule,
-        entryPoint: "vsMain",
-        buffers: [
-          {
-            arrayStride: overlayVertexStride,
-            attributes: [
-              {
-                shaderLocation: 0,
-                offset: 0,
-                format: "float32x2",
-              },
-              {
-                shaderLocation: 1,
-                offset: 2 * Float32Array.BYTES_PER_ELEMENT,
-                format: "float32x3",
-              },
-            ],
-          },
-        ],
-      },
-      fragment: {
-        module: overlayShaderModule,
-        entryPoint: "fsMain",
-        targets: [
-          {
-            format: presentationFormat,
-          },
-        ],
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none",
-      },
-      depthStencil: {
-        format: "depth24plus",
-        depthWriteEnabled: false,
-        depthCompare: "always",
-      },
-    });
-
-    return {
-      vertexBuffer: overlayVertexBuffer,
-      vertexData: overlayVertexData,
-      pipeline: overlayPipeline,
-      vertexCount: overlayVertexCount,
-    };
-  }
-
-  private updateOverlayVertexData(
-    overlayResources: WebGpuOverlayResources,
-    width: number,
-    height: number,
-  ): void {
-    const left = overlayPaddingPx;
-    const top = overlayPaddingPx;
-    const right = left + overlaySizePx;
-    const bottom = top + overlaySizePx;
-
-    const leftNdc = (left / width) * 2 - 1;
-    const rightNdc = (right / width) * 2 - 1;
-    const topNdc = 1 - (top / height) * 2;
-    const bottomNdc = 1 - (bottom / height) * 2;
-
-    overlayResources.vertexData.set(
-      [
-        leftNdc,
-        topNdc,
-        overlayColor.r,
-        overlayColor.g,
-        overlayColor.b,
-        rightNdc,
-        topNdc,
-        overlayColor.r,
-        overlayColor.g,
-        overlayColor.b,
-        rightNdc,
-        bottomNdc,
-        overlayColor.r,
-        overlayColor.g,
-        overlayColor.b,
-        leftNdc,
-        topNdc,
-        overlayColor.r,
-        overlayColor.g,
-        overlayColor.b,
-        rightNdc,
-        bottomNdc,
-        overlayColor.r,
-        overlayColor.g,
-        overlayColor.b,
-        leftNdc,
-        bottomNdc,
-        overlayColor.r,
-        overlayColor.g,
-        overlayColor.b,
-      ],
-      0,
-    );
-  }
-
-  private drawOverlay(
-    renderPass: GPURenderPassEncoder,
-    overlayResources: WebGpuOverlayResources,
-  ): void {
-    renderPass.setPipeline(overlayResources.pipeline);
-    renderPass.setVertexBuffer(0, overlayResources.vertexBuffer);
-    renderPass.draw(overlayResources.vertexCount);
+  ): Promise<void> {
+    for (const renderItem of this.renderItems) {
+      await renderItem.initialize({
+        device,
+        presentationFormat,
+      });
+    }
   }
 
   private renderFrame(timestamp: DOMHighResTimeStamp): void {
     const device = this.device;
     const context = this.context;
-    const sceneResources = this.sceneResources;
 
-    if (
-      this.isDisposed ||
-      device === null ||
-      context === null ||
-      sceneResources === null
-    ) {
+    if (this.isDisposed || device === null || context === null) {
       return;
     }
 
     const { width, height } = this.ensureDrawableSize(device);
-    const aspectRatio = width / height;
+    const depthTexture = this.depthTexture;
 
-    this.updateOverlayVertexData(sceneResources.overlayResources, width, height);
+    if (depthTexture === null) {
+      return;
+    }
 
-    this.program.writeFrameUniforms({
-      uniformValues: sceneResources.uniformValues,
+    const frameContext: WebGpuRenderItemFrameContext = {
+      device,
+      queue: device.queue,
+      canvas: this.canvas,
       timestamp,
-      aspectRatio,
-      cameraDistance: this.cameraDistance,
-      rotationSpeedX: this.rotationSpeedX,
-      rotationSpeedY: this.rotationSpeedY,
-    });
+      width,
+      height,
+      aspectRatio: width / height,
+    };
 
-    device.queue.writeBuffer(
-      sceneResources.uniformBuffer,
-      0,
-      sceneResources.uniformValues,
-    );
-    device.queue.writeBuffer(
-      sceneResources.overlayResources.vertexBuffer,
-      0,
-      sceneResources.overlayResources.vertexData,
-    );
+    for (const renderItem of this.renderItems) {
+      renderItem.prepareFrame?.(frameContext);
+    }
 
     const commandEncoder = device.createCommandEncoder({
-      label: `${this.program.label}-command-encoder`,
+      label: "webgpu-engine-command-encoder",
     });
     const renderPass = commandEncoder.beginRenderPass({
       colorAttachments: [
@@ -574,22 +685,18 @@ export class WebGpuEngine {
         },
       ],
       depthStencilAttachment: {
-        view: this.depthTexture!.createView(),
+        view: depthTexture.createView(),
         depthClearValue: 1,
         depthLoadOp: "clear",
         depthStoreOp: "store",
       },
     });
 
-    renderPass.setPipeline(sceneResources.pipeline);
-    renderPass.setBindGroup(this.program.bindGroupIndex, sceneResources.bindGroup);
-    renderPass.setVertexBuffer(0, sceneResources.vertexBuffer);
-    renderPass.setIndexBuffer(sceneResources.indexBuffer, sceneResources.indexFormat);
-    renderPass.drawIndexed(sceneResources.indexCount);
-    this.drawOverlay(renderPass, sceneResources.overlayResources);
+    for (const renderItem of this.renderItems) {
+      renderItem.encodeRenderPass(renderPass, frameContext);
+    }
+
     renderPass.end();
-
-
     device.queue.submit([commandEncoder.finish()]);
     this.animationFrameId = window.requestAnimationFrame(this.renderFrame);
   }
@@ -622,7 +729,7 @@ export class WebGpuEngine {
     this.destroyDepthTexture();
 
     this.depthTexture = activeDevice.createTexture({
-      label: `${this.program.label}-depth-texture`,
+      label: "webgpu-engine-depth-texture",
       size: [nextWidth, nextHeight],
       format: "depth24plus",
       usage: GPUTextureUsage.RENDER_ATTACHMENT,
@@ -631,20 +738,9 @@ export class WebGpuEngine {
     return { width: nextWidth, height: nextHeight };
   }
 
-  private destroySceneResources(
-    sceneResources: WebGpuSceneResources | null = this.sceneResources,
-  ): void {
-    if (sceneResources === null) {
-      return;
-    }
-
-    sceneResources.vertexBuffer.destroy();
-    sceneResources.indexBuffer.destroy();
-    sceneResources.uniformBuffer.destroy();
-    sceneResources.overlayResources.vertexBuffer.destroy();
-
-    if (sceneResources === this.sceneResources) {
-      this.sceneResources = null;
+  private destroyRenderItems(): void {
+    for (const renderItem of this.renderItems) {
+      renderItem.dispose();
     }
   }
 
@@ -668,13 +764,5 @@ export class WebGpuEngine {
       phase: "error",
       message: `GPU 设备已断开：${info.message || info.reason}`,
     });
-  }
-
-  private getDeviceOrThrow(): GPUDevice {
-    if (this.device === null) {
-      throw new Error("WebGPU 设备尚未初始化。");
-    }
-
-    return this.device;
   }
 }
