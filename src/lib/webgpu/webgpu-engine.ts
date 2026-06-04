@@ -23,6 +23,13 @@ export type WebGpuClearColor = Readonly<{
   a: number;
 }>;
 
+type WebGpuOverlayResources = {
+  vertexBuffer: GPUBuffer;
+  vertexData: Float32Array<ArrayBuffer>;
+  pipeline: GPURenderPipeline;
+  vertexCount: number;
+};
+
 type WebGpuSceneResources = {
   vertexBuffer: GPUBuffer;
   indexBuffer: GPUBuffer;
@@ -32,6 +39,7 @@ type WebGpuSceneResources = {
   bindGroup: GPUBindGroup;
   indexCount: number;
   indexFormat: GPUIndexFormat;
+  overlayResources: WebGpuOverlayResources;
 };
 
 export type WebGpuEngineOptions = Readonly<{
@@ -52,6 +60,17 @@ function createUniformValues(byteLength: number): Float32Array<ArrayBuffer> {
 
   return new Float32Array(byteLength / Float32Array.BYTES_PER_ELEMENT);
 }
+
+const overlayShaderUrl = "/shaders/overlay-square.wgsl";
+const overlayVertexStride = 5 * Float32Array.BYTES_PER_ELEMENT;
+const overlayVertexCount = 6;
+const overlayPaddingPx = 16;
+const overlaySizePx = 96;
+const overlayColor = {
+  r: 0.95,
+  g: 0.35,
+  b: 0.35,
+} as const;
 
 export class WebGpuEngine {
   private readonly canvas: HTMLCanvasElement;
@@ -191,7 +210,7 @@ export class WebGpuEngine {
   private async createSceneResources(
     presentationFormat: GPUTextureFormat,
   ): Promise<WebGpuSceneResources> {
-    const { mesh, shaderCode } = await this.loadSceneAssets();
+    const { mesh, shaderCode, overlayShaderCode } = await this.loadSceneAssets();
     const device = this.getDeviceOrThrow();
     const shaderModule = this.createShaderModule(shaderCode);
     const vertexBuffer = this.createVertexBuffer(device, mesh);
@@ -214,6 +233,11 @@ export class WebGpuEngine {
         uniformBuffer,
       }),
     });
+    const overlayResources = this.createOverlayResources(
+      device,
+      presentationFormat,
+      overlayShaderCode,
+    );
 
     return {
       vertexBuffer,
@@ -224,21 +248,24 @@ export class WebGpuEngine {
       bindGroup,
       indexCount,
       indexFormat,
+      overlayResources,
     };
   }
 
   private async loadSceneAssets(): Promise<{
     mesh: ObjMesh;
     shaderCode: string;
+    overlayShaderCode: string;
   }> {
     this.updateStatus({
       phase: "initializing",
       message: "正在加载场景资源...",
     });
 
-    const [modelResponse, shaderResponse] = await Promise.all([
+    const [modelResponse, shaderResponse, overlayShaderResponse] = await Promise.all([
       fetch(this.modelUrl),
       fetch(this.program.shaderUrl),
+      fetch(overlayShaderUrl),
     ]);
 
     if (!modelResponse.ok) {
@@ -253,9 +280,16 @@ export class WebGpuEngine {
       );
     }
 
-    const [modelText, shaderCode] = await Promise.all([
+    if (!overlayShaderResponse.ok) {
+      throw new Error(
+        `加载 Overlay Shader 失败：${overlayShaderResponse.status} ${overlayShaderResponse.statusText || "未知错误"}`,
+      );
+    }
+
+    const [modelText, shaderCode, overlayShaderCode] = await Promise.all([
       modelResponse.text(),
       shaderResponse.text(),
+      overlayShaderResponse.text(),
     ]);
     const mesh = parseObj(modelText);
 
@@ -264,6 +298,7 @@ export class WebGpuEngine {
     return {
       mesh,
       shaderCode,
+      overlayShaderCode,
     };
   }
 
@@ -359,6 +394,134 @@ export class WebGpuEngine {
     };
   }
 
+  private createOverlayResources(
+    device: GPUDevice,
+    presentationFormat: GPUTextureFormat,
+    overlayShaderCode: string,
+  ): WebGpuOverlayResources {
+    const overlayShaderModule = device.createShaderModule({
+      label: "overlay-square-shader",
+      code: overlayShaderCode,
+    });
+    const overlayVertexBuffer = device.createBuffer({
+      label: "overlay-square-vertex-buffer",
+      size: overlayVertexCount * overlayVertexStride,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+    const overlayVertexData = new Float32Array(overlayVertexCount * 5);
+    const overlayPipeline = device.createRenderPipeline({
+      label: "overlay-square-render-pipeline",
+      layout: "auto",
+      vertex: {
+        module: overlayShaderModule,
+        entryPoint: "vsMain",
+        buffers: [
+          {
+            arrayStride: overlayVertexStride,
+            attributes: [
+              {
+                shaderLocation: 0,
+                offset: 0,
+                format: "float32x2",
+              },
+              {
+                shaderLocation: 1,
+                offset: 2 * Float32Array.BYTES_PER_ELEMENT,
+                format: "float32x3",
+              },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: overlayShaderModule,
+        entryPoint: "fsMain",
+        targets: [
+          {
+            format: presentationFormat,
+          },
+        ],
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none",
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: false,
+        depthCompare: "always",
+      },
+    });
+
+    return {
+      vertexBuffer: overlayVertexBuffer,
+      vertexData: overlayVertexData,
+      pipeline: overlayPipeline,
+      vertexCount: overlayVertexCount,
+    };
+  }
+
+  private updateOverlayVertexData(
+    overlayResources: WebGpuOverlayResources,
+    width: number,
+    height: number,
+  ): void {
+    const left = overlayPaddingPx;
+    const top = overlayPaddingPx;
+    const right = left + overlaySizePx;
+    const bottom = top + overlaySizePx;
+
+    const leftNdc = (left / width) * 2 - 1;
+    const rightNdc = (right / width) * 2 - 1;
+    const topNdc = 1 - (top / height) * 2;
+    const bottomNdc = 1 - (bottom / height) * 2;
+
+    overlayResources.vertexData.set(
+      [
+        leftNdc,
+        topNdc,
+        overlayColor.r,
+        overlayColor.g,
+        overlayColor.b,
+        rightNdc,
+        topNdc,
+        overlayColor.r,
+        overlayColor.g,
+        overlayColor.b,
+        rightNdc,
+        bottomNdc,
+        overlayColor.r,
+        overlayColor.g,
+        overlayColor.b,
+        leftNdc,
+        topNdc,
+        overlayColor.r,
+        overlayColor.g,
+        overlayColor.b,
+        rightNdc,
+        bottomNdc,
+        overlayColor.r,
+        overlayColor.g,
+        overlayColor.b,
+        leftNdc,
+        bottomNdc,
+        overlayColor.r,
+        overlayColor.g,
+        overlayColor.b,
+      ],
+      0,
+    );
+  }
+
+  private drawOverlay(
+    renderPass: GPURenderPassEncoder,
+    overlayResources: WebGpuOverlayResources,
+  ): void {
+    renderPass.setPipeline(overlayResources.pipeline);
+    renderPass.setVertexBuffer(0, overlayResources.vertexBuffer);
+    renderPass.draw(overlayResources.vertexCount);
+  }
+
   private renderFrame(timestamp: DOMHighResTimeStamp): void {
     const device = this.device;
     const context = this.context;
@@ -376,6 +539,8 @@ export class WebGpuEngine {
     const { width, height } = this.ensureDrawableSize(device);
     const aspectRatio = width / height;
 
+    this.updateOverlayVertexData(sceneResources.overlayResources, width, height);
+
     this.program.writeFrameUniforms({
       uniformValues: sceneResources.uniformValues,
       timestamp,
@@ -389,6 +554,11 @@ export class WebGpuEngine {
       sceneResources.uniformBuffer,
       0,
       sceneResources.uniformValues,
+    );
+    device.queue.writeBuffer(
+      sceneResources.overlayResources.vertexBuffer,
+      0,
+      sceneResources.overlayResources.vertexData,
     );
 
     const commandEncoder = device.createCommandEncoder({
@@ -416,6 +586,7 @@ export class WebGpuEngine {
     renderPass.setVertexBuffer(0, sceneResources.vertexBuffer);
     renderPass.setIndexBuffer(sceneResources.indexBuffer, sceneResources.indexFormat);
     renderPass.drawIndexed(sceneResources.indexCount);
+    this.drawOverlay(renderPass, sceneResources.overlayResources);
     renderPass.end();
 
 
@@ -470,6 +641,7 @@ export class WebGpuEngine {
     sceneResources.vertexBuffer.destroy();
     sceneResources.indexBuffer.destroy();
     sceneResources.uniformBuffer.destroy();
+    sceneResources.overlayResources.vertexBuffer.destroy();
 
     if (sceneResources === this.sceneResources) {
       this.sceneResources = null;
