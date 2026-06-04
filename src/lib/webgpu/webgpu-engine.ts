@@ -34,30 +34,47 @@ export type WebGpuRenderItemFrameContext = Readonly<{
   aspectRatio: number;
 }>;
 
-export type WebGpuRenderItem = {
-  initialize(
+export type WebGpuRenderItemInitializable = {
+  initialize?(
     context: WebGpuRenderItemInitializeContext,
   ): Promise<void> | void;
+};
+
+export type WebGpuRenderItemFramePreparable = {
   prepareFrame?(context: WebGpuRenderItemFrameContext): void;
-  encodeRenderPass(
+};
+
+export type WebGpuRenderPassEncodable = {
+  encodeRenderPass?(
     renderPass: GPURenderPassEncoder,
     context: WebGpuRenderItemFrameContext,
   ): void;
-  dispose(): void;
 };
+
+export type WebGpuRenderItemDisposable = {
+  dispose?(): void;
+};
+
+export type WebGpuRenderItem = WebGpuRenderItemInitializable &
+  WebGpuRenderItemFramePreparable &
+  WebGpuRenderPassEncodable &
+  WebGpuRenderItemDisposable;
+
+export type WebGpuRenderItemsFactory = () => readonly WebGpuRenderItem[];
 
 export type WebGpuEngineOptions = Readonly<{
   canvas: HTMLCanvasElement;
-  renderItems: readonly WebGpuRenderItem[];
+  createRenderItems: WebGpuRenderItemsFactory;
   clearColor: WebGpuClearColor;
   onStatusChange(status: WebGpuEngineStatus): void;
 }>;
 
 export class WebGpuEngine {
   private readonly canvas: HTMLCanvasElement;
+  private readonly createRenderItems: WebGpuEngineOptions["createRenderItems"];
   private readonly clearColor: WebGpuClearColor;
   private readonly onStatusChange: WebGpuEngineOptions["onStatusChange"];
-  private readonly renderItems: WebGpuRenderItem[];
+  private renderItems: WebGpuRenderItem[] = [];
 
   private animationFrameId = 0;
   private isDisposed = false;
@@ -67,9 +84,9 @@ export class WebGpuEngine {
 
   public constructor(options: WebGpuEngineOptions) {
     this.canvas = options.canvas;
+    this.createRenderItems = options.createRenderItems;
     this.clearColor = options.clearColor;
     this.onStatusChange = options.onStatusChange;
-    this.renderItems = [...options.renderItems];
 
     this.handleDeviceLost = this.handleDeviceLost.bind(this);
     this.renderFrame = this.renderFrame.bind(this);
@@ -140,9 +157,10 @@ export class WebGpuEngine {
 
       this.updateStatus({
         phase: "initializing",
-        message: "正在加载场景资源...",
+        message: "正在初始化渲染项...",
       });
 
+      this.renderItems = [...this.createRenderItems()];
       await this.initializeRenderItems(device, presentationFormat);
 
       if (this.isDisposed) {
@@ -189,7 +207,7 @@ export class WebGpuEngine {
     presentationFormat: GPUTextureFormat,
   ): Promise<void> {
     for (const renderItem of this.renderItems) {
-      await renderItem.initialize({
+      await renderItem.initialize?.({
         device,
         presentationFormat,
       });
@@ -246,7 +264,7 @@ export class WebGpuEngine {
     });
 
     for (const renderItem of this.renderItems) {
-      renderItem.encodeRenderPass(renderPass, frameContext);
+      renderItem.encodeRenderPass?.(renderPass, frameContext);
     }
 
     renderPass.end();
@@ -293,8 +311,10 @@ export class WebGpuEngine {
 
   private destroyRenderItems(): void {
     for (const renderItem of this.renderItems) {
-      renderItem.dispose();
+      renderItem.dispose?.();
     }
+
+    this.renderItems = [];
   }
 
   private destroyDepthTexture(): void {

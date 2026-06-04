@@ -1,18 +1,13 @@
 "use client";
 
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   WebGpuEngine,
   type WebGpuClearColor,
   type WebGpuEngineStatus,
-  type WebGpuRenderItem,
+  type WebGpuRenderItemsFactory,
 } from "@/lib/webgpu/webgpu-engine";
-import {
-  createOverlayRenderItem,
-  createRotatingMeshRenderItem,
-} from "@/lib/webgpu/render-items";
-import type { WebGpuProgramDefinition } from "@/lib/webgpu/programs/types";
 
 const defaultBackgroundColor = "#020617";
 const defaultClearColor = {
@@ -41,32 +36,16 @@ function createClearColor(
 }
 
 export type WebGpuSurfaceProps = Readonly<{
+  createRenderItems: WebGpuRenderItemsFactory;
   ariaLabel?: string;
   backgroundColor?: string;
   clearColor?: WebGpuSurfaceClearColor;
   style?: CSSProperties;
-}> &
-  (
-    | Readonly<{
-        renderItems: readonly WebGpuRenderItem[];
-        modelUrl?: never;
-        program?: never;
-        cameraDistance?: never;
-        rotationSpeedX?: never;
-        rotationSpeedY?: never;
-      }>
-    | Readonly<{
-        modelUrl: string;
-        program: WebGpuProgramDefinition;
-        cameraDistance?: number;
-        rotationSpeedX?: number;
-        rotationSpeedY?: number;
-        renderItems?: never;
-      }>
-  );
+}>;
 
 export function WebGpuSurface(props: WebGpuSurfaceProps) {
   const {
+    createRenderItems,
     ariaLabel = "WebGPU surface",
     backgroundColor = defaultBackgroundColor,
     clearColor,
@@ -82,58 +61,6 @@ export function WebGpuSurface(props: WebGpuSurfaceProps) {
   const clearGreen = clearColor?.g ?? defaultClearColor.g;
   const clearBlue = clearColor?.b ?? defaultClearColor.b;
   const clearAlpha = clearColor?.a ?? defaultClearColor.a;
-  const renderItemsProp = "renderItems" in props ? props.renderItems : undefined;
-  const modelUrl = "renderItems" in props ? undefined : props.modelUrl;
-  const program = "renderItems" in props ? undefined : props.program;
-  const cameraDistance =
-    "renderItems" in props ? undefined : (props.cameraDistance ?? -5);
-  const rotationSpeedX =
-    "renderItems" in props ? undefined : (props.rotationSpeedX ?? 0.0007);
-  const rotationSpeedY =
-    "renderItems" in props ? undefined : (props.rotationSpeedY ?? 0.001);
-  const defaultRenderItems = useMemo<readonly WebGpuRenderItem[] | null>(
-    function createDefaultRenderItems() {
-      if (
-        renderItemsProp !== undefined ||
-        modelUrl === undefined ||
-        program === undefined ||
-        cameraDistance === undefined ||
-        rotationSpeedX === undefined ||
-        rotationSpeedY === undefined
-      ) {
-        return null;
-      }
-
-      return [
-        createRotatingMeshRenderItem({
-          modelUrl,
-          program,
-          cameraDistance,
-          rotationSpeedX,
-          rotationSpeedY,
-        }),
-        createOverlayRenderItem(),
-      ];
-    },
-    [
-      renderItemsProp,
-      modelUrl,
-      program,
-      cameraDistance,
-      rotationSpeedX,
-      rotationSpeedY,
-    ],
-  );
-  const resolvedRenderItems = useMemo<readonly WebGpuRenderItem[]>(
-    function resolveRenderItems() {
-      if (renderItemsProp !== undefined) {
-        return renderItemsProp;
-      }
-
-      return defaultRenderItems ?? [];
-    },
-    [renderItemsProp, defaultRenderItems],
-  );
 
   useEffect(function setupSurfaceEngine() {
     const canvas = canvasRef.current;
@@ -155,7 +82,7 @@ export function WebGpuSurface(props: WebGpuSurfaceProps) {
 
     const engine = new WebGpuEngine({
       canvas,
-      renderItems: resolvedRenderItems,
+      createRenderItems,
       clearColor: normalizedClearColor,
       onStatusChange: handleEngineStatusChange,
     });
@@ -166,11 +93,11 @@ export function WebGpuSurface(props: WebGpuSurfaceProps) {
       engine.dispose();
     };
   }, [
+    createRenderItems,
     clearAlpha,
     clearBlue,
     clearGreen,
     clearRed,
-    resolvedRenderItems,
   ]);
 
   return (
