@@ -326,8 +326,19 @@ export class WebGpuEngine {
     presentationFormat: GPUTextureFormat,
   ): GPURenderPipeline {
     const device = this.getDeviceOrThrow();
+    const pipelineDescriptor = this.createRenderPipelineDescriptor(
+      shaderModule,
+      presentationFormat,
+    );
 
-    return device.createRenderPipeline({
+    return device.createRenderPipeline(pipelineDescriptor);
+  }
+
+  private createRenderPipelineDescriptor(
+    shaderModule: GPUShaderModule,
+    presentationFormat: GPUTextureFormat,
+  ): GPURenderPipelineDescriptor {
+    return {
       label: `${this.program.label}-render-pipeline`,
       layout: "auto",
       vertex: {
@@ -346,7 +357,7 @@ export class WebGpuEngine {
       },
       primitive: this.program.primitive,
       depthStencil: this.program.depthStencil,
-    });
+    };
   }
 
   private renderFrame(timestamp: DOMHighResTimeStamp): void {
