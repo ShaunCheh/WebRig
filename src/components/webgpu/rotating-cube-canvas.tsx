@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { fitMeshToUnitCube, parseObj } from "@/lib/loaders/obj-loader";
 import {
   createPerspectiveMat4,
   createRotationXMat4,
@@ -12,6 +13,7 @@ import {
 const shaderCode = /* wgsl */ `
 struct Uniforms {
   modelViewProjectionMatrix: mat4x4<f32>,
+  modelMatrix: mat4x4<f32>,
 };
 
 @group(0) @binding(0)
@@ -19,72 +21,36 @@ var<uniform> uniforms: Uniforms;
 
 struct VertexInput {
   @location(0) position: vec3<f32>,
-  @location(1) color: vec3<f32>,
+  @location(1) normal: vec3<f32>,
 };
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
-  @location(0) color: vec3<f32>,
+  @location(0) worldNormal: vec3<f32>,
 };
 
 @vertex
 fn vsMain(input: VertexInput) -> VertexOutput {
   var output: VertexOutput;
   output.position = uniforms.modelViewProjectionMatrix * vec4<f32>(input.position, 1.0);
-  output.color = input.color;
+  output.worldNormal = normalize((uniforms.modelMatrix * vec4<f32>(input.normal, 0.0)).xyz);
   return output;
 }
 
 @fragment
 fn fsMain(input: VertexOutput) -> @location(0) vec4<f32> {
-  return vec4<f32>(input.color, 1.0);
+  let lightDirection = normalize(vec3<f32>(0.45, 0.7, 1.0));
+  let diffuse = max(dot(normalize(input.worldNormal), lightDirection), 0.0);
+  let ambient = 0.22;
+  let baseColor = vec3<f32>(0.35, 0.72, 1.0);
+
+  return vec4<f32>(baseColor * (ambient + diffuse * 0.78), 1.0);
 }
 `;
 
-const cubeVertices = new Float32Array([
-  // Front
-  -1, -1, 1, 1, 0, 0,
-  1, -1, 1, 1, 0, 0,
-  1, 1, 1, 1, 0, 0,
-  -1, 1, 1, 1, 0, 0,
-  // Back
-  1, -1, -1, 0, 1, 0,
-  -1, -1, -1, 0, 1, 0,
-  -1, 1, -1, 0, 1, 0,
-  1, 1, -1, 0, 1, 0,
-  // Right
-  1, -1, 1, 0, 0, 1,
-  1, -1, -1, 0, 0, 1,
-  1, 1, -1, 0, 0, 1,
-  1, 1, 1, 0, 0, 1,
-  // Left
-  -1, -1, -1, 1, 1, 0,
-  -1, -1, 1, 1, 1, 0,
-  -1, 1, 1, 1, 1, 0,
-  -1, 1, -1, 1, 1, 0,
-  // Top
-  -1, 1, 1, 1, 0, 1,
-  1, 1, 1, 1, 0, 1,
-  1, 1, -1, 1, 0, 1,
-  -1, 1, -1, 1, 0, 1,
-  // Bottom
-  -1, -1, -1, 0, 1, 1,
-  1, -1, -1, 0, 1, 1,
-  1, -1, 1, 0, 1, 1,
-  -1, -1, 1, 0, 1, 1,
-]);
-
-const cubeIndices = new Uint16Array([
-  0, 1, 2, 0, 2, 3,
-  4, 5, 6, 4, 6, 7,
-  8, 9, 10, 8, 10, 11,
-  12, 13, 14, 12, 14, 15,
-  16, 17, 18, 16, 18, 19,
-  20, 21, 22, 20, 22, 23,
-]);
-
 const vertexStride = 6 * Float32Array.BYTES_PER_ELEMENT;
-const cubeDistance = -5;
+const modelDistance = -5;
+const modelUrl = "/models/cube.obj";
 
 type Status =
   | {
@@ -121,6 +87,10 @@ export function RotatingCubeCanvas() {
     let vertexBuffer: GPUBuffer | null = null;
     let indexBuffer: GPUBuffer | null = null;
     let uniformBuffer: GPUBuffer | null = null;
+    let indexCount = 0;
+    let indexFormat: GPUIndexFormat = "uint16";
+
+    const uniformValues = new Float32Array(32);
 
     const updateStatus = (nextStatus: Status) => {
       if (!isDisposed) {
@@ -225,37 +195,66 @@ export function RotatingCubeCanvas() {
           alphaMode: "opaque",
         });
 
+        updateStatus({
+          phase: "initializing",
+          message: "正在加载 OBJ 模型...",
+        });
+
+        const response = await fetch(modelUrl);
+
+        if (!response.ok) {
+          throw new Error(
+            `加载 OBJ 失败：${response.status} ${response.statusText || "未知错误"}`,
+          );
+        }
+
+        const mesh = parseObj(await response.text());
+        fitMeshToUnitCube(mesh.vertices);
+
+        if (isDisposed) {
+          return;
+        }
+
         const shaderModule = device.createShaderModule({
-          label: "cube-shader",
+          label: "obj-shader",
           code: shaderCode,
         });
 
+        indexCount = mesh.indices.length;
+        indexFormat = mesh.indices instanceof Uint32Array ? "uint32" : "uint16";
+
         vertexBuffer = device.createBuffer({
-          label: "cube-vertex-buffer",
-          size: cubeVertices.byteLength,
+          label: "obj-vertex-buffer",
+          size: mesh.vertices.byteLength,
           usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
           mappedAtCreation: true,
         });
-        new Float32Array(vertexBuffer.getMappedRange()).set(cubeVertices);
+        new Float32Array(vertexBuffer.getMappedRange()).set(mesh.vertices);
         vertexBuffer.unmap();
 
         indexBuffer = device.createBuffer({
-          label: "cube-index-buffer",
-          size: cubeIndices.byteLength,
+          label: "obj-index-buffer",
+          size: mesh.indices.byteLength,
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
           mappedAtCreation: true,
         });
-        new Uint16Array(indexBuffer.getMappedRange()).set(cubeIndices);
+
+        if (mesh.indices instanceof Uint32Array) {
+          new Uint32Array(indexBuffer.getMappedRange()).set(mesh.indices);
+        } else {
+          new Uint16Array(indexBuffer.getMappedRange()).set(mesh.indices);
+        }
+
         indexBuffer.unmap();
 
         uniformBuffer = device.createBuffer({
-          label: "cube-uniform-buffer",
-          size: 16 * Float32Array.BYTES_PER_ELEMENT,
+          label: "obj-uniform-buffer",
+          size: uniformValues.byteLength,
           usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
         const pipeline = device.createRenderPipeline({
-          label: "cube-render-pipeline",
+          label: "obj-render-pipeline",
           layout: "auto",
           vertex: {
             module: shaderModule,
@@ -299,7 +298,7 @@ export function RotatingCubeCanvas() {
         });
 
         const bindGroup = device.createBindGroup({
-          label: "cube-bind-group",
+          label: "obj-bind-group",
           layout: pipeline.getBindGroupLayout(0),
           entries: [
             {
@@ -338,17 +337,20 @@ export function RotatingCubeCanvas() {
           const rotationXMatrix = createRotationXMat4(timestamp * 0.0007);
           const rotationYMatrix = createRotationYMat4(timestamp * 0.001);
           const modelMatrix = multiplyMat4(rotationYMatrix, rotationXMatrix);
-          const viewMatrix = createTranslationMat4(0, 0, cubeDistance);
+          const viewMatrix = createTranslationMat4(0, 0, modelDistance);
           const viewModelMatrix = multiplyMat4(viewMatrix, modelMatrix);
           const modelViewProjectionMatrix = multiplyMat4(
             projectionMatrix,
             viewModelMatrix,
           );
 
-          device.queue.writeBuffer(uniformBuffer, 0, modelViewProjectionMatrix);
+          uniformValues.set(modelViewProjectionMatrix, 0);
+          uniformValues.set(modelMatrix, 16);
+
+          device.queue.writeBuffer(uniformBuffer, 0, uniformValues);
 
           const commandEncoder = device.createCommandEncoder({
-            label: "cube-command-encoder",
+            label: "obj-command-encoder",
           });
           const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [
@@ -375,8 +377,8 @@ export function RotatingCubeCanvas() {
           renderPass.setPipeline(pipeline);
           renderPass.setBindGroup(0, bindGroup);
           renderPass.setVertexBuffer(0, vertexBuffer);
-          renderPass.setIndexBuffer(indexBuffer, "uint16");
-          renderPass.drawIndexed(cubeIndices.length);
+          renderPass.setIndexBuffer(indexBuffer, indexFormat);
+          renderPass.drawIndexed(indexCount);
           renderPass.end();
 
           device.queue.submit([commandEncoder.finish()]);
