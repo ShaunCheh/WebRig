@@ -50,7 +50,7 @@ fn fsMain(input: VertexOutput) -> @location(0) vec4<f32> {
 
 const vertexStride = 6 * Float32Array.BYTES_PER_ELEMENT;
 const modelDistance = -5;
-const modelUrl = "/models/cube.obj";
+const modelUrl = "/models/torus.obj";
 
 type Status =
   | {
@@ -128,7 +128,7 @@ export function RotatingCubeCanvas() {
 
       depthTexture?.destroy();
       depthTexture = activeDevice.createTexture({
-        label: "cube-depth-texture",
+        label: "model-depth-texture",
         size: [nextWidth, nextHeight],
         format: "depth24plus",
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
@@ -421,7 +421,7 @@ export function RotatingCubeCanvas() {
     >
       <canvas
         ref={canvasRef}
-        aria-label="Rotating WebGPU cube"
+        aria-label="Rotating WebGPU model"
         style={{
           width: "100%",
           height: "100%",
