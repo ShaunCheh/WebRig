@@ -10,6 +10,7 @@ export default function WebGpuPage() {
     >
       <WebGpuSurface
         modelUrl="/models/torus.obj"
+        shaderUrl="/shaders/basic-lit.wgsl"
         ariaLabel="Rotating WebGPU torus"
       />
     </main>

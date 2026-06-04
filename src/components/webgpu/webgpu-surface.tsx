@@ -11,44 +11,6 @@ import {
   multiplyMat4,
 } from "@/lib/math/mat4";
 
-const shaderCode = /* wgsl */ `
-struct Uniforms {
-  modelViewProjectionMatrix: mat4x4<f32>,
-  modelMatrix: mat4x4<f32>,
-};
-
-@group(0) @binding(0)
-var<uniform> uniforms: Uniforms;
-
-struct VertexInput {
-  @location(0) position: vec3<f32>,
-  @location(1) normal: vec3<f32>,
-};
-
-struct VertexOutput {
-  @builtin(position) position: vec4<f32>,
-  @location(0) worldNormal: vec3<f32>,
-};
-
-@vertex
-fn vsMain(input: VertexInput) -> VertexOutput {
-  var output: VertexOutput;
-  output.position = uniforms.modelViewProjectionMatrix * vec4<f32>(input.position, 1.0);
-  output.worldNormal = normalize((uniforms.modelMatrix * vec4<f32>(input.normal, 0.0)).xyz);
-  return output;
-}
-
-@fragment
-fn fsMain(input: VertexOutput) -> @location(0) vec4<f32> {
-  let lightDirection = normalize(vec3<f32>(0.45, 0.7, 1.0));
-  let diffuse = max(dot(normalize(input.worldNormal), lightDirection), 0.0);
-  let ambient = 0.22;
-  let baseColor = vec3<f32>(0.35, 0.72, 1.0);
-
-  return vec4<f32>(baseColor * (ambient + diffuse * 0.78), 1.0);
-}
-`;
-
 const vertexStride = 6 * Float32Array.BYTES_PER_ELEMENT;
 const defaultBackgroundColor = "#020617";
 const defaultClearColor = {
@@ -81,6 +43,7 @@ type SurfaceClearColor = {
 
 export type WebGpuSurfaceProps = Readonly<{
   modelUrl: string;
+  shaderUrl: string;
   ariaLabel?: string;
   cameraDistance?: number;
   rotationSpeedX?: number;
@@ -92,6 +55,7 @@ export type WebGpuSurfaceProps = Readonly<{
 
 export function WebGpuSurface({
   modelUrl,
+  shaderUrl,
   ariaLabel = "WebGPU surface",
   cameraDistance = -5,
   rotationSpeedX = 0.0007,
@@ -235,18 +199,31 @@ export function WebGpuSurface({
 
         updateStatus({
           phase: "initializing",
-          message: "正在加载 OBJ 模型...",
+          message: "正在加载场景资源...",
         });
 
-        const response = await fetch(modelUrl);
+        const [modelResponse, shaderResponse] = await Promise.all([
+          fetch(modelUrl),
+          fetch(shaderUrl),
+        ]);
 
-        if (!response.ok) {
+        if (!modelResponse.ok) {
           throw new Error(
-            `加载 OBJ 失败：${response.status} ${response.statusText || "未知错误"}`,
+            `加载 OBJ 失败：${modelResponse.status} ${modelResponse.statusText || "未知错误"}`,
           );
         }
 
-        const mesh = parseObj(await response.text());
+        if (!shaderResponse.ok) {
+          throw new Error(
+            `加载 Shader 失败：${shaderResponse.status} ${shaderResponse.statusText || "未知错误"}`,
+          );
+        }
+
+        const [modelText, shaderCode] = await Promise.all([
+          modelResponse.text(),
+          shaderResponse.text(),
+        ]);
+        const mesh = parseObj(modelText);
         fitMeshToUnitCube(mesh.vertices);
 
         if (isDisposed) {
@@ -254,7 +231,7 @@ export function WebGpuSurface({
         }
 
         const shaderModule = device.createShaderModule({
-          label: "surface-shader",
+          label: shaderUrl,
           code: shaderCode,
         });
 
@@ -451,6 +428,7 @@ export function WebGpuSurface({
     clearGreen,
     clearRed,
     modelUrl,
+    shaderUrl,
     rotationSpeedX,
     rotationSpeedY,
   ]);
